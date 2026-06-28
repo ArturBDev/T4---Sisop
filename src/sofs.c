@@ -327,12 +327,221 @@ int sofs_umount(void)
  * Operações de arquivo (TODO)
  * ---------------------------------------------------------------------- */
 
+static struct { int in_use; unsigned int inode_num; unsigned int pos; } g_sofs_open_table[10];
+
 SOFS_FILE sofs_create(char *filename)
 {
     /* TODO: aloca um i-node (alloc_inode), adiciona um registro de diretório,
      * abre o arquivo e retorna um handle. Se o arquivo já existir,
      * trunca-o para zero bytes primeiro. */
-    (void)filename;
+    unsigned int block_size, inode_area, inodes_per_block, records_per_block, ptrs_per_block;
+    unsigned int inode_num, lb, ri, i;
+    struct sofs_inode root, inode;
+    struct sofs_record rec;
+    unsigned char *buf, *ibuf;
+    int abs_block, new_inode, handle, found;
+    unsigned int dir_idx = 0;
+
+    if (!g_mounted || filename == NULL)
+        return -1;
+
+    block_size = g_superbloco.blockSize * SECTOR_SIZE;
+    inode_area = 1 + g_superbloco.freeBlocksBitmapSize + g_superbloco.freeInodeBitmapSize;
+    inodes_per_block = block_size / sizeof(struct sofs_inode);
+    records_per_block = block_size / sizeof(struct sofs_record);
+    ptrs_per_block = block_size / sizeof(DWORD);
+    buf = (unsigned char *)__builtin_alloca(block_size);
+    ibuf = (unsigned char *)__builtin_alloca(block_size);
+
+    if (read_block(inode_area, ibuf) != 0)
+        return -1;
+    memcpy(&root, ibuf, sizeof(root));
+
+    found = 0;
+    for (lb = 0; lb < root.blocksFileSize; lb++) {
+        if (lb < 2) {
+            if (root.dataPtr[lb] == 0) continue;
+            abs_block = (int)root.dataPtr[lb];
+        } else if (lb - 2 < ptrs_per_block) {
+            if (root.singleIndPtr == 0) continue;
+            if (read_block(root.singleIndPtr, buf) != 0) continue;
+            if (((DWORD *)buf)[lb - 2] == 0) continue;
+            abs_block = (int)((DWORD *)buf)[lb - 2];
+        } else
+            continue;
+
+        if (read_block((unsigned int)abs_block, buf) != 0)
+            continue;
+        for (ri = 0; ri < records_per_block; ri++) {
+            struct sofs_record *records = (struct sofs_record *)buf;
+            if (records[ri].TypeVal != TYPEVAL_INVALIDO &&
+                strcmp(records[ri].name, filename) == 0) {
+                memcpy(&rec, &records[ri], sizeof(rec));
+                found = 1;
+                break;
+            }
+        }
+        if (found) break;
+    }
+
+    if (found) {
+        unsigned int bi, bj;
+        inode_num = rec.inodeNumber;
+        if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+            return -1;
+        memcpy(&inode, ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+               sizeof(inode));
+
+        for (i = 0; i < 2; i++) {
+            if (inode.dataPtr[i] != 0)
+                free_data_block(inode.dataPtr[i]);
+            inode.dataPtr[i] = 0;
+        }
+        if (inode.singleIndPtr != 0) {
+            if (read_block(inode.singleIndPtr, buf) == 0) {
+                DWORD *ptrs = (DWORD *)buf;
+                for (bi = 0; bi < ptrs_per_block; bi++)
+                    if (ptrs[bi] != 0) free_data_block(ptrs[bi]);
+            }
+            free_data_block(inode.singleIndPtr);
+            inode.singleIndPtr = 0;
+        }
+        if (inode.doubleIndPtr != 0) {
+            if (read_block(inode.doubleIndPtr, buf) == 0) {
+                DWORD *ptrs = (DWORD *)buf;
+                for (bi = 0; bi < ptrs_per_block; bi++) {
+                    if (ptrs[bi] != 0) {
+                        if (read_block(ptrs[bi], ibuf) == 0) {
+                            DWORD *ptrs2 = (DWORD *)ibuf;
+                            for (bj = 0; bj < ptrs_per_block; bj++)
+                                if (ptrs2[bj] != 0) free_data_block(ptrs2[bj]);
+                        }
+                        free_data_block(ptrs[bi]);
+                    }
+                }
+            }
+            free_data_block(inode.doubleIndPtr);
+            inode.doubleIndPtr = 0;
+        }
+        inode.blocksFileSize = 0;
+        inode.bytesFileSize = 0;
+        if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+            return -1;
+        memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+               &inode, sizeof(inode));
+        if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+            return -1;
+    } else {
+        new_inode = alloc_inode();
+        if (new_inode < 0)
+            return -1;
+        inode_num = (unsigned int)new_inode;
+        memset(&inode, 0, sizeof(inode));
+        inode.RefCounter = 1;
+        if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0) {
+            free_inode(inode_num);
+            return -1;
+        }
+        memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+               &inode, sizeof(inode));
+        if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0) {
+            free_inode(inode_num);
+            return -1;
+        }
+
+        abs_block = -1;
+        for (lb = 0; lb < root.blocksFileSize; lb++) {
+            int db;
+            if (lb < 2) {
+                if (root.dataPtr[lb] == 0) continue;
+                db = (int)root.dataPtr[lb];
+            } else if (lb - 2 < ptrs_per_block) {
+                if (root.singleIndPtr == 0) continue;
+                if (read_block(root.singleIndPtr, buf) != 0) continue;
+                if (((DWORD *)buf)[lb - 2] == 0) continue;
+                db = (int)((DWORD *)buf)[lb - 2];
+            } else
+                continue;
+            if (read_block((unsigned int)db, buf) != 0)
+                continue;
+            for (ri = 0; ri < records_per_block; ri++) {
+                if (((struct sofs_record *)buf)[ri].TypeVal == TYPEVAL_INVALIDO) {
+                    abs_block = db;
+                    dir_idx = ri;
+                    break;
+                }
+            }
+            if (abs_block >= 0) break;
+        }
+
+        if (abs_block < 0) {
+            unsigned int new_lb = root.blocksFileSize;
+            if (new_lb < 2) {
+                abs_block = alloc_data_block();
+                if (abs_block < 0) { free_inode(inode_num); return -1; }
+                root.dataPtr[new_lb] = (DWORD)abs_block;
+                root.blocksFileSize++;
+            } else if (new_lb - 2 < ptrs_per_block) {
+                if (root.singleIndPtr == 0) {
+                    abs_block = alloc_data_block();
+                    if (abs_block < 0) { free_inode(inode_num); return -1; }
+                    root.singleIndPtr = (DWORD)abs_block;
+                }
+                if (read_block(root.singleIndPtr, buf) != 0) {
+                    free_inode(inode_num);
+                    return -1;
+                }
+                if (((DWORD *)buf)[new_lb - 2] == 0) {
+                    abs_block = alloc_data_block();
+                    if (abs_block < 0) { free_inode(inode_num); return -1; }
+                    ((DWORD *)buf)[new_lb - 2] = (DWORD)abs_block;
+                    if (write_block(root.singleIndPtr, buf) != 0) {
+                        free_inode(inode_num);
+                        return -1;
+                    }
+                } else {
+                    abs_block = (int)((DWORD *)buf)[new_lb - 2];
+                }
+                root.blocksFileSize++;
+            } else {
+                free_inode(inode_num);
+                return -1;
+            }
+            if (read_block(inode_area, ibuf) != 0) {
+                free_inode(inode_num);
+                return -1;
+            }
+            memcpy(ibuf, &root, sizeof(root));
+            if (write_block(inode_area, ibuf) != 0) {
+                free_inode(inode_num);
+                return -1;
+            }
+            dir_idx = 0;
+            if (read_block((unsigned int)abs_block, buf) != 0) {
+                free_inode(inode_num);
+                return -1;
+            }
+        }
+
+        memset(&((struct sofs_record *)buf)[dir_idx], 0, sizeof(struct sofs_record));
+        ((struct sofs_record *)buf)[dir_idx].TypeVal = TYPEVAL_REGULAR;
+        strncpy(((struct sofs_record *)buf)[dir_idx].name, filename, 50);
+        ((struct sofs_record *)buf)[dir_idx].name[50] = '\0';
+        ((struct sofs_record *)buf)[dir_idx].inodeNumber = inode_num;
+        if (write_block((unsigned int)abs_block, buf) != 0) {
+            free_inode(inode_num);
+            return -1;
+        }
+    }
+
+    for (handle = 0; handle < 10; handle++) {
+        if (!g_sofs_open_table[handle].in_use) {
+            g_sofs_open_table[handle].in_use = 1;
+            g_sofs_open_table[handle].inode_num = inode_num;
+            g_sofs_open_table[handle].pos = 0;
+            return (SOFS_FILE)handle;
+        }
+    }
     return -1;
 }
 
@@ -341,8 +550,107 @@ int sofs_delete(char *name)
     /* TODO: localiza o registro de diretório de <name>, libera todos os blocos
      * de dados referenciados pelo i-node (free_data_block), libera o i-node
      * (free_inode) e invalida o registro de diretório. */
-    (void)name;
-    return -1;
+    unsigned int block_size, inode_area, inodes_per_block, records_per_block, ptrs_per_block;
+    unsigned int inode_num, lb, ri, i, bi, bj;
+    struct sofs_inode root, inode;
+    struct sofs_record rec;
+    unsigned char *buf, *ibuf;
+    int abs_block, found;
+    unsigned int dir_block = 0;
+    unsigned int dir_idx = 0;
+
+    if (!g_mounted || name == NULL)
+        return -1;
+
+    block_size = g_superbloco.blockSize * SECTOR_SIZE;
+    inode_area = 1 + g_superbloco.freeBlocksBitmapSize + g_superbloco.freeInodeBitmapSize;
+    inodes_per_block = block_size / sizeof(struct sofs_inode);
+    records_per_block = block_size / sizeof(struct sofs_record);
+    ptrs_per_block = block_size / sizeof(DWORD);
+    buf = (unsigned char *)__builtin_alloca(block_size);
+    ibuf = (unsigned char *)__builtin_alloca(block_size);
+
+    if (read_block(inode_area, ibuf) != 0)
+        return -1;
+    memcpy(&root, ibuf, sizeof(root));
+
+    found = 0;
+    for (lb = 0; lb < root.blocksFileSize; lb++) {
+        if (lb < 2) {
+            if (root.dataPtr[lb] == 0) continue;
+            abs_block = (int)root.dataPtr[lb];
+        } else if (lb - 2 < ptrs_per_block) {
+            if (root.singleIndPtr == 0) continue;
+            if (read_block(root.singleIndPtr, buf) != 0) continue;
+            if (((DWORD *)buf)[lb - 2] == 0) continue;
+            abs_block = (int)((DWORD *)buf)[lb - 2];
+        } else
+            continue;
+
+        if (read_block((unsigned int)abs_block, buf) != 0)
+            continue;
+        for (ri = 0; ri < records_per_block; ri++) {
+            struct sofs_record *records = (struct sofs_record *)buf;
+            if (records[ri].TypeVal != TYPEVAL_INVALIDO &&
+                strcmp(records[ri].name, name) == 0) {
+                memcpy(&rec, &records[ri], sizeof(rec));
+                dir_block = (unsigned int)abs_block;
+                dir_idx = ri;
+                found = 1;
+                break;
+            }
+        }
+        if (found) break;
+    }
+    if (!found)
+        return -1;
+
+    inode_num = rec.inodeNumber;
+    if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+        return -1;
+    memcpy(&inode, ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+           sizeof(inode));
+
+    for (i = 0; i < 2; i++) {
+        if (inode.dataPtr[i] != 0)
+            free_data_block(inode.dataPtr[i]);
+        inode.dataPtr[i] = 0;
+    }
+    if (inode.singleIndPtr != 0) {
+        if (read_block(inode.singleIndPtr, buf) == 0) {
+            DWORD *ptrs = (DWORD *)buf;
+            for (bi = 0; bi < ptrs_per_block; bi++)
+                if (ptrs[bi] != 0) free_data_block(ptrs[bi]);
+        }
+        free_data_block(inode.singleIndPtr);
+        inode.singleIndPtr = 0;
+    }
+    if (inode.doubleIndPtr != 0) {
+        if (read_block(inode.doubleIndPtr, buf) == 0) {
+            DWORD *ptrs = (DWORD *)buf;
+            for (bi = 0; bi < ptrs_per_block; bi++) {
+                if (ptrs[bi] != 0) {
+                    if (read_block(ptrs[bi], ibuf) == 0) {
+                        DWORD *ptrs2 = (DWORD *)ibuf;
+                        for (bj = 0; bj < ptrs_per_block; bj++)
+                            if (ptrs2[bj] != 0) free_data_block(ptrs2[bj]);
+                    }
+                    free_data_block(ptrs[bi]);
+                }
+            }
+        }
+        free_data_block(inode.doubleIndPtr);
+        inode.doubleIndPtr = 0;
+    }
+
+    if (free_inode(inode_num) != 0)
+        return -1;
+
+    if (read_block(dir_block, buf) != 0)
+        return -1;
+    memset(&((struct sofs_record *)buf)[dir_idx], 0, sizeof(struct sofs_record));
+    ((struct sofs_record *)buf)[dir_idx].TypeVal = TYPEVAL_INVALIDO;
+    return write_block(dir_block, buf);
 }
 
 SOFS_FILE sofs_open(char *name)
@@ -350,25 +658,170 @@ SOFS_FILE sofs_open(char *name)
     /* TODO: localiza o registro de diretório de <name>, verifica que o arquivo
      * existe, aloca uma entrada na tabela de arquivos abertos, inicializa o
      * ponteiro de posição em 0 e retorna o handle. */
-    (void)name;
+    unsigned int block_size, inode_area, records_per_block, ptrs_per_block;
+    unsigned int inode_num, lb, ri;
+    struct sofs_inode root, inode;
+    struct sofs_record rec;
+    unsigned char *buf, *ibuf;
+    int abs_block, found, handle;
+
+    if (!g_mounted || name == NULL)
+        return -1;
+
+    block_size = g_superbloco.blockSize * SECTOR_SIZE;
+    inode_area = 1 + g_superbloco.freeBlocksBitmapSize + g_superbloco.freeInodeBitmapSize;
+    records_per_block = block_size / sizeof(struct sofs_record);
+    ptrs_per_block = block_size / sizeof(DWORD);
+    buf = (unsigned char *)__builtin_alloca(block_size);
+    ibuf = (unsigned char *)__builtin_alloca(block_size);
+
+    if (read_block(inode_area, ibuf) != 0)
+        return -1;
+    memcpy(&root, ibuf, sizeof(root));
+
+    found = 0;
+    for (lb = 0; lb < root.blocksFileSize; lb++) {
+        if (lb < 2) {
+            if (root.dataPtr[lb] == 0) continue;
+            abs_block = (int)root.dataPtr[lb];
+        } else if (lb - 2 < ptrs_per_block) {
+            if (root.singleIndPtr == 0) continue;
+            if (read_block(root.singleIndPtr, buf) != 0) continue;
+            if (((DWORD *)buf)[lb - 2] == 0) continue;
+            abs_block = (int)((DWORD *)buf)[lb - 2];
+        } else
+            continue;
+
+        if (read_block((unsigned int)abs_block, buf) != 0)
+            continue;
+        for (ri = 0; ri < records_per_block; ri++) {
+            struct sofs_record *records = (struct sofs_record *)buf;
+            if (records[ri].TypeVal != TYPEVAL_INVALIDO &&
+                strcmp(records[ri].name, name) == 0) {
+                memcpy(&rec, &records[ri], sizeof(rec));
+                found = 1;
+                break;
+            }
+        }
+        if (found) break;
+    }
+    if (!found)
+        return -1;
+
+    inode_num = rec.inodeNumber;
+
+    if (rec.TypeVal == TYPEVAL_LINK) {
+        char target[51];
+        if (read_block(inode_area + inode_num / (block_size / sizeof(struct sofs_inode)),
+                        ibuf) != 0)
+            return -1;
+        memcpy(&inode, ibuf + (inode_num % (block_size / sizeof(struct sofs_inode)))
+                        * sizeof(struct sofs_inode), sizeof(inode));
+        if (inode.dataPtr[0] == 0)
+            return -1;
+        if (read_block(inode.dataPtr[0], buf) != 0)
+            return -1;
+        strncpy(target, (char *)buf, 50);
+        target[50] = '\0';
+        return sofs_open(target);
+    }
+
+    for (handle = 0; handle < 10; handle++) {
+        if (!g_sofs_open_table[handle].in_use) {
+            g_sofs_open_table[handle].in_use = 1;
+            g_sofs_open_table[handle].inode_num = inode_num;
+            g_sofs_open_table[handle].pos = 0;
+            return (SOFS_FILE)handle;
+        }
+    }
     return -1;
 }
 
 int sofs_close(SOFS_FILE handle)
 {
     /* TODO: valida <handle> e libera sua entrada na tabela de arquivos abertos. */
-    (void)handle;
-    return -1;
+    if (!g_mounted || handle < 0 || handle >= 10)
+        return -1;
+    if (!g_sofs_open_table[handle].in_use)
+        return -1;
+    g_sofs_open_table[handle].in_use = 0;
+    return 0;
 }
 
 int sofs_read(SOFS_FILE handle, char *buffer, int size)
 {
     /* TODO: lê até <size> bytes do arquivo a partir da posição corrente;
      * avança o ponteiro de posição; retorna o número de bytes efetivamente lidos. */
-    (void)handle;
-    (void)buffer;
-    (void)size;
-    return -1;
+    unsigned int block_size, inode_area, inodes_per_block, ptrs_per_block;
+    unsigned int inode_num, pos, file_size, cur_pos, logical_blk, blk_offset, to_read;
+    struct sofs_inode inode;
+    unsigned char *buf, *ibuf;
+    int abs_block, bytes_read;
+
+    if (!g_mounted || handle < 0 || handle >= 10)
+        return -1;
+    if (!g_sofs_open_table[handle].in_use)
+        return -1;
+    if (buffer == NULL || size <= 0)
+        return 0;
+
+    block_size = g_superbloco.blockSize * SECTOR_SIZE;
+    inode_area = 1 + g_superbloco.freeBlocksBitmapSize + g_superbloco.freeInodeBitmapSize;
+    inodes_per_block = block_size / sizeof(struct sofs_inode);
+    ptrs_per_block = block_size / sizeof(DWORD);
+    buf = (unsigned char *)__builtin_alloca(block_size);
+    ibuf = (unsigned char *)__builtin_alloca(block_size);
+
+    inode_num = g_sofs_open_table[handle].inode_num;
+    if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+        return -1;
+    memcpy(&inode, ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+           sizeof(inode));
+
+    pos = g_sofs_open_table[handle].pos;
+    file_size = inode.bytesFileSize;
+    if (pos >= file_size)
+        return 0;
+    if (pos + (unsigned int)size > file_size)
+        size = (int)(file_size - pos);
+
+    bytes_read = 0;
+    while (bytes_read < size) {
+        cur_pos = pos + (unsigned int)bytes_read;
+        logical_blk = cur_pos / block_size;
+        blk_offset = cur_pos % block_size;
+        to_read = block_size - blk_offset;
+        if (to_read > (unsigned int)(size - bytes_read))
+            to_read = (unsigned int)(size - bytes_read);
+
+        if (logical_blk < 2) {
+            if (inode.dataPtr[logical_blk] == 0) break;
+            abs_block = (int)inode.dataPtr[logical_blk];
+        } else if (logical_blk - 2 < ptrs_per_block) {
+            if (inode.singleIndPtr == 0) break;
+            if (read_block(inode.singleIndPtr, buf) != 0) break;
+            if (((DWORD *)buf)[logical_blk - 2] == 0) break;
+            abs_block = (int)((DWORD *)buf)[logical_blk - 2];
+        } else {
+            unsigned int lb = logical_blk - 2 - ptrs_per_block;
+            unsigned int l1 = lb / ptrs_per_block;
+            unsigned int l2 = lb % ptrs_per_block;
+            if (inode.doubleIndPtr == 0) break;
+            if (read_block(inode.doubleIndPtr, buf) != 0) break;
+            if (((DWORD *)buf)[l1] == 0) break;
+            if (read_block(((DWORD *)buf)[l1], ibuf) != 0) break;
+            if (((DWORD *)ibuf)[l2] == 0) break;
+            abs_block = (int)((DWORD *)ibuf)[l2];
+        }
+
+        if (read_block((unsigned int)abs_block, buf) != 0)
+            break;
+        memcpy(buffer + bytes_read, buf + blk_offset, to_read);
+        bytes_read += (int)to_read;
+    }
+
+    g_sofs_open_table[handle].pos += (unsigned int)bytes_read;
+    return bytes_read;
 }
 
 int sofs_write(SOFS_FILE handle, char *buffer, int size)
@@ -376,10 +829,161 @@ int sofs_write(SOFS_FILE handle, char *buffer, int size)
     /* TODO: grava <size> bytes no arquivo a partir da posição corrente,
      * alocando novos blocos de dados conforme necessário (alloc_data_block);
      * avança o ponteiro de posição; retorna o número de bytes gravados. */
-    (void)handle;
-    (void)buffer;
-    (void)size;
-    return -1;
+    unsigned int block_size, inode_area, inodes_per_block, ptrs_per_block;
+    unsigned int inode_num, pos, cur_pos, logical_blk, blk_offset, to_write;
+    struct sofs_inode inode;
+    unsigned char *buf, *ibuf, *buf2;
+    int abs_block, bytes_written, new_block;
+
+    if (!g_mounted || handle < 0 || handle >= 10)
+        return -1;
+    if (!g_sofs_open_table[handle].in_use)
+        return -1;
+    if (buffer == NULL || size <= 0)
+        return 0;
+
+    block_size = g_superbloco.blockSize * SECTOR_SIZE;
+    inode_area = 1 + g_superbloco.freeBlocksBitmapSize + g_superbloco.freeInodeBitmapSize;
+    inodes_per_block = block_size / sizeof(struct sofs_inode);
+    ptrs_per_block = block_size / sizeof(DWORD);
+    buf = (unsigned char *)__builtin_alloca(block_size);
+    ibuf = (unsigned char *)__builtin_alloca(block_size);
+    buf2 = (unsigned char *)__builtin_alloca(block_size);
+
+    inode_num = g_sofs_open_table[handle].inode_num;
+    if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+        return -1;
+    memcpy(&inode, ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+           sizeof(inode));
+
+    pos = g_sofs_open_table[handle].pos;
+    bytes_written = 0;
+
+    while (bytes_written < size) {
+        cur_pos = pos + (unsigned int)bytes_written;
+        logical_blk = cur_pos / block_size;
+        blk_offset = cur_pos % block_size;
+        to_write = block_size - blk_offset;
+        if (to_write > (unsigned int)(size - bytes_written))
+            to_write = (unsigned int)(size - bytes_written);
+
+        abs_block = -1;
+        if (logical_blk < 2) {
+            if (inode.dataPtr[logical_blk] != 0)
+                abs_block = (int)inode.dataPtr[logical_blk];
+            else {
+                new_block = alloc_data_block();
+                if (new_block < 0) break;
+                inode.dataPtr[logical_blk] = (DWORD)new_block;
+                inode.blocksFileSize++;
+                abs_block = new_block;
+                if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+                memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+                       &inode, sizeof(inode));
+                if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+            }
+        } else if (logical_blk - 2 < ptrs_per_block) {
+            if (inode.singleIndPtr == 0) {
+                new_block = alloc_data_block();
+                if (new_block < 0) break;
+                inode.singleIndPtr = (DWORD)new_block;
+                if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+                memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+                       &inode, sizeof(inode));
+                if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+            }
+            if (read_block(inode.singleIndPtr, buf) != 0) break;
+            if (((DWORD *)buf)[logical_blk - 2] != 0)
+                abs_block = (int)((DWORD *)buf)[logical_blk - 2];
+            else {
+                new_block = alloc_data_block();
+                if (new_block < 0) break;
+                ((DWORD *)buf)[logical_blk - 2] = (DWORD)new_block;
+                if (write_block(inode.singleIndPtr, buf) != 0) break;
+                inode.blocksFileSize++;
+                abs_block = new_block;
+                if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+                memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+                       &inode, sizeof(inode));
+                if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+            }
+        } else {
+            unsigned int lb = logical_blk - 2 - ptrs_per_block;
+            unsigned int l1 = lb / ptrs_per_block;
+            unsigned int l2 = lb % ptrs_per_block;
+            unsigned int l1_block;
+
+            if (inode.doubleIndPtr == 0) {
+                new_block = alloc_data_block();
+                if (new_block < 0) break;
+                inode.doubleIndPtr = (DWORD)new_block;
+                if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+                memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+                       &inode, sizeof(inode));
+                if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+            }
+            if (read_block(inode.doubleIndPtr, buf) != 0) break;
+            if (((DWORD *)buf)[l1] == 0) {
+                new_block = alloc_data_block();
+                if (new_block < 0) break;
+                ((DWORD *)buf)[l1] = (DWORD)new_block;
+                if (write_block(inode.doubleIndPtr, buf) != 0) break;
+            }
+            l1_block = ((DWORD *)buf)[l1];
+            if (read_block(l1_block, buf2) != 0) break;
+            if (((DWORD *)buf2)[l2] != 0)
+                abs_block = (int)((DWORD *)buf2)[l2];
+            else {
+                new_block = alloc_data_block();
+                if (new_block < 0) break;
+                ((DWORD *)buf2)[l2] = (DWORD)new_block;
+                if (write_block(l1_block, buf2) != 0) break;
+                inode.blocksFileSize++;
+                abs_block = new_block;
+                if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+                memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+                       &inode, sizeof(inode));
+                if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                    break;
+            }
+        }
+
+        if (abs_block < 0) break;
+
+        if (blk_offset != 0 || to_write < block_size) {
+            if (read_block((unsigned int)abs_block, buf) != 0)
+                break;
+        } else {
+            memset(buf, 0, block_size);
+        }
+
+        memcpy(buf + blk_offset, buffer + bytes_written, to_write);
+        if (write_block((unsigned int)abs_block, buf) != 0)
+            break;
+
+        bytes_written += (int)to_write;
+        if (cur_pos + to_write > inode.bytesFileSize) {
+            inode.bytesFileSize = cur_pos + to_write;
+            if (read_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                break;
+            memcpy(ibuf + (inode_num % inodes_per_block) * sizeof(struct sofs_inode),
+                   &inode, sizeof(inode));
+            if (write_block(inode_area + inode_num / inodes_per_block, ibuf) != 0)
+                break;
+        }
+    }
+
+    g_sofs_open_table[handle].pos += (unsigned int)bytes_written;
+    return bytes_written;
 }
 
 /* -------------------------------------------------------------------------
