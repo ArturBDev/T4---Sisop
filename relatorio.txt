@@ -1,0 +1,37 @@
+Integrantes do Grupo:
+- Artur Santos
+- Gabriel Madke Santini
+
+Relatório de Implementação - Trabalho 4 (sofs)
+==============================================
+
+Neste trabalho, concluímos a implementação do sistema de arquivos sofs, adicionando suporte a diretórios, arquivos regulares, softlinks e hardlinks sobre a camada de blocos fornecida.
+
+As seguintes decisões de projeto e detalhes de implementação foram seguidos:
+
+1. Gerenciamento e Formatação (sofs_format):
+   - Adicionada a inicialização das áreas de bitmap de blocos livres, bitmap de i-nodes livres e área de i-nodes gravando zeros (blocos vazios).
+   - O i-node 0 (diretório raiz) foi reservado no bitmap de i-nodes configurando o primeiro bit como ocupado (1).
+
+2. Prevenção de Loops em Softlinks (sofs_open):
+   - Para evitar estouro de pilha (stack overflow) caso ocorra uma dependência cíclica de softlinks (ex: a -> b e b -> a), foi adicionado um limite estático de até 5 indireções de resolução antes de retornar erro.
+
+3. Controle de Referências na Remoção (sofs_delete):
+   - Ajustada a remoção de arquivos e links para decrementar o campo RefCounter do i-node.
+   - A liberação real dos blocos de dados (via free_data_block) e do i-node (via free_inode) ocorre apenas quando o RefCounter chega a 1 ou menos (último link removido).
+
+4. Operações de Diretório (sofs_opendir, sofs_readdir, sofs_closedir):
+   - O diretório raiz (i-node 0) é percorrido sequencialmente. O ponteiro de leitura sequencial pula blocos que não estão alocados no diretório e retorna apenas registros válidos (TypeVal != TYPEVAL_INVALIDO), preenchendo as informações de nome, tipo e obtendo o tamanho correto de bytes a partir do i-node de cada arquivo.
+
+5. Criação de Vínculos (sofs_sln, sofs_hln):
+   - softlinks (sofs_sln): Aloca um i-node e um bloco de dados para gravar o nome do arquivo de destino (limite de 50 caracteres). Cria uma entrada de diretório com o tipo TYPEVAL_LINK.
+   - hardlinks (sofs_hln): Localiza o i-node do arquivo alvo, incrementa o RefCounter dele, e cria um novo registro no diretório raiz apontando para o mesmo i-node.
+
+Como compilar e executar:
+-------------------------
+1. Em host Linux (WSL/Ubuntu), instale o pacote de compilação 32-bit:
+   $ sudo apt install gcc-multilib make
+2. Execute o make para gerar o executável de demonstração:
+   $ make exemplo
+3. Execute o programa de teste:
+   $ ./bin/exemplo

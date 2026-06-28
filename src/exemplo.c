@@ -32,12 +32,14 @@ static void listar_diretorio(void)
 
     printf("=== Conteúdo do diretório raiz ===\n");
 
-    if (sofs_opendir() != 0) {
+    if (sofs_opendir() != 0)
+    {
         printf("  [erro] sofs_opendir falhou\n");
         return;
     }
 
-    while ((ret = sofs_readdir(&entrada)) == 0) {
+    while ((ret = sofs_readdir(&entrada)) == 0)
+    {
         printf("  %-50s  tipo=%s  tamanho=%u bytes\n",
                entrada.name,
                entrada.fileType == TYPEVAL_REGULAR ? "regular" : "link",
@@ -50,7 +52,7 @@ static void listar_diretorio(void)
 
 int main(void)
 {
-    int particao = 0;       /* número da partição a formatar/montar */
+    int particao = 0;          /* número da partição a formatar/montar */
     int setores_por_bloco = 2; /* tamanho de bloco = 2 * 256 = 512 bytes */
 
     /* ------------------------------------------------------------------
@@ -69,9 +71,10 @@ int main(void)
     printf("Formatando partição %d com %d setores/bloco...\n",
            particao, setores_por_bloco);
 
-    if (sofs_format(particao, setores_por_bloco) != 0) {
+    if (sofs_format(particao, setores_por_bloco) != 0)
+    {
         fprintf(stderr, "ERRO: sofs_format falhou.\n"
-                "Verifique se t2fs_disk.dat está no diretório corrente.\n");
+                        "Verifique se t2fs_disk.dat está no diretório corrente.\n");
         return 1;
     }
     printf("sofs_format: OK\n\n");
@@ -81,7 +84,8 @@ int main(void)
      * ------------------------------------------------------------------ */
     printf("Montando partição %d...\n", particao);
 
-    if (sofs_mount(particao) != 0) {
+    if (sofs_mount(particao) != 0)
+    {
         fprintf(stderr, "ERRO: sofs_mount falhou.\n");
         return 1;
     }
@@ -104,9 +108,12 @@ int main(void)
 
         printf("Criando arquivo 'teste.txt'...\n");
         arq = sofs_create("teste.txt");
-        if (arq < 0) {
+        if (arq < 0)
+        {
             printf("  [erro] sofs_create falhou\n");
-        } else {
+        }
+        else
+        {
             int n = sofs_write(arq, dados, (int)strlen(dados));
             printf("  sofs_write: %d bytes gravados\n", n);
             sofs_close(arq);
@@ -114,7 +121,8 @@ int main(void)
 
         printf("Criando arquivo 'dados.bin'...\n");
         arq = sofs_create("dados.bin");
-        if (arq >= 0) {
+        if (arq >= 0)
+        {
             char buf[256];
             memset(buf, 0xAB, sizeof(buf));
             sofs_write(arq, buf, sizeof(buf));
@@ -132,9 +140,12 @@ int main(void)
 
         printf("Lendo arquivo 'teste.txt'...\n");
         arq = sofs_open("teste.txt");
-        if (arq < 0) {
+        if (arq < 0)
+        {
             printf("  [erro] sofs_open falhou\n");
-        } else {
+        }
+        else
+        {
             memset(buf, 0, sizeof(buf));
             n = sofs_read(arq, buf, sizeof(buf) - 1);
             printf("  sofs_read: %d bytes lidos: \"%s\"\n", n, buf);
@@ -179,7 +190,8 @@ int main(void)
      * ------------------------------------------------------------------ */
     printf("Desmontando partição...\n");
 
-    if (sofs_umount() != 0) {
+    if (sofs_umount() != 0)
+    {
         fprintf(stderr, "ERRO: sofs_umount falhou.\n");
         return 1;
     }
