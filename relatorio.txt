@@ -27,11 +27,21 @@ As seguintes decisões de projeto e detalhes de implementação foram seguidos:
    - softlinks (sofs_sln): Aloca um i-node e um bloco de dados para gravar o nome do arquivo de destino (limite de 50 caracteres). Cria uma entrada de diretório com o tipo TYPEVAL_LINK.
    - hardlinks (sofs_hln): Localiza o i-node do arquivo alvo, incrementa o RefCounter dele, e cria um novo registro no diretório raiz apontando para o mesmo i-node.
 
+6. Testes Adicionais e Casos de Borda (testes_extra.c):
+   - Foram implementados testes automatizados adicionais cobrindo:
+     a) Gravação e leitura incremental (validação do avanço automático do ponteiro cursor/offset).
+     b) Limite da tabela global de arquivos abertos (garantia de no máximo 10 handles ativos).
+     c) Prevenção de loop cíclico em softlinks (interrupção do rastreamento recursivo após 5 indireções).
+     d) Persistência de hardlink (garantia de que a remoção do arquivo original não corrompa/apague os dados se ainda houver referências ativas ao i-node).
+
 Como compilar e executar:
 -------------------------
 1. Em host Linux (WSL/Ubuntu), instale o pacote de compilação 32-bit:
    $ sudo apt install gcc-multilib make
-2. Execute o make para gerar o executável de demonstração:
+2. Execute o make para gerar os executáveis:
    $ make exemplo
-3. Execute o programa de teste:
+   $ make testes_extra
+3. Execute os programas de teste:
    $ ./bin/exemplo
+   $ ./bin/testes_extra
+
