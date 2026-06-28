@@ -35,6 +35,7 @@ VENDOR_OBJS = $(LIB_DIR)/apidisk.o \
 
 LIBRARY = $(LIB_DIR)/libsofs.a
 EXEMPLO = $(BIN_DIR)/exemplo
+TESTES_EXTRA = $(BIN_DIR)/testes_extra
 
 # --------------------------------------------------------------------------
 # Alvo padrão
@@ -59,6 +60,9 @@ $(BIN_DIR)/%.o: $(SRC_DIR)/%.c
 exemplo: $(LIBRARY) $(SRC_DIR)/exemplo.c
 	$(CC) $(CFLAGS) -m32 $(SRC_DIR)/exemplo.c -o $(EXEMPLO) -L$(LIB_DIR) -lsofs
 
+testes_extra: $(LIBRARY) $(SRC_DIR)/testes_extra.c
+	$(CC) $(CFLAGS) -m32 $(SRC_DIR)/testes_extra.c -o $(TESTES_EXTRA) -L$(LIB_DIR) -lsofs
+
 # --------------------------------------------------------------------------
 # Smoke-test: compila um programa mínimo contra os cabeçalhos da libsofs.a
 # para verificar que a API é auto-consistente.
@@ -76,7 +80,7 @@ check:
 # Clean: remove objetos gerados e a biblioteca; objetos do fornecedor são mantidos
 # --------------------------------------------------------------------------
 clean:
-	rm -f $(OBJS) $(LIBRARY) $(EXEMPLO)
+	rm -f $(OBJS) $(LIBRARY) $(EXEMPLO) $(TESTES_EXTRA)
 	rm -f $(BIN_DIR)/*~ $(SRC_DIR)/*~ $(INC_DIR)/*~ *~
 
-.PHONY: all exemplo check clean
+.PHONY: all exemplo testes_extra check clean
